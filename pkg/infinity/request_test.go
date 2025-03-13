@@ -3,11 +3,15 @@ package infinity_test
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/grafana/grafana-infinity-datasource/pkg/infinity"
 	"github.com/grafana/grafana-infinity-datasource/pkg/models"
+	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
@@ -15,11 +19,102 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-func Test_getQueryURL(t *testing.T) {
+func TestGetRequest(t *testing.T) {
+	tests := []struct {
+		name           string
+		pCtx           *backend.PluginContext
+		settings       models.InfinitySettings
+		body           io.Reader
+		query          models.Query
+		requestHeaders map[string]string
+		wantReq        *http.Request
+		wantReqBody    bool
+		wantErr        error
+	}{
+		{
+			name:    "shouldn't interpolate grafana values from query",
+			pCtx:    &backend.PluginContext{PluginID: "hello"},
+			query:   models.Query{URLOptions: models.URLOptions{Headers: []models.URLOptionKeyValuePair{{Key: "Something", Value: "${__plugin.id}"}}}},
+			wantReq: &http.Request{URL: &url.URL{}, Header: http.Header{"Something": []string{"${__plugin.id}"}}, Method: http.MethodGet},
+		},
+		{
+			name:     "should forward grafana headers correctly when set in the custom header settings",
+			pCtx:     &backend.PluginContext{PluginID: "hello"},
+			settings: models.InfinitySettings{CustomHeaders: map[string]string{"Something": "${__plugin.id}"}},
+			wantReq:  &http.Request{URL: &url.URL{}, Header: http.Header{"Something": []string{"hello"}}, Method: http.MethodGet},
+		},
+		{
+			name:     "should override values from settings compared to query",
+			pCtx:     &backend.PluginContext{PluginID: "hello"},
+			query:    models.Query{URLOptions: models.URLOptions{Headers: []models.URLOptionKeyValuePair{{Key: "Something", Value: "Some Value"}}}},
+			settings: models.InfinitySettings{CustomHeaders: map[string]string{"Something": "${__plugin.id}"}},
+			wantReq:  &http.Request{URL: &url.URL{}, Header: http.Header{"Something": []string{"hello"}}, Method: http.MethodGet},
+		},
+		{
+			name: "should error if DELETE method requested without enabled in the settings",
+			pCtx: &backend.PluginContext{PluginID: "hello"},
+			query: models.Query{
+				URLOptions: models.URLOptions{Method: "delete"},
+			},
+			wantErr: backend.DownstreamError(models.ErrNotAllowedDangerousHTTPMethods),
+		},
+		{
+			name:     "should allow if DELETE method requested with enabled in the settings",
+			pCtx:     &backend.PluginContext{PluginID: "hello"},
+			query:    models.Query{URLOptions: models.URLOptions{Method: "delete"}},
+			settings: models.InfinitySettings{AllowDangerousHTTPMethods: true},
+			wantReq:  &http.Request{URL: &url.URL{}, Method: http.MethodDelete},
+		},
+		{
+			name:        "should not include body when not supplied in the query for non GET/POST methods",
+			pCtx:        &backend.PluginContext{PluginID: "hello"},
+			query:       models.Query{URLOptions: models.URLOptions{Method: "delete"}},
+			settings:    models.InfinitySettings{AllowDangerousHTTPMethods: true},
+			wantReq:     &http.Request{URL: &url.URL{}, Method: http.MethodDelete},
+			wantReqBody: false,
+		},
+		{
+			name:        "should include body when supplied in the query for non GET/POST methods",
+			pCtx:        &backend.PluginContext{PluginID: "hello"},
+			query:       models.Query{URLOptions: models.URLOptions{Method: "patch", Body: "foo"}},
+			body:        io.NopCloser(strings.NewReader("foo")),
+			settings:    models.InfinitySettings{AllowDangerousHTTPMethods: true},
+			wantReq:     &http.Request{URL: &url.URL{}, Method: http.MethodPatch},
+			wantReqBody: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotReq, err := infinity.GetRequest(context.TODO(), tt.pCtx, tt.settings, tt.body, tt.query, tt.requestHeaders, true)
+			if tt.wantErr != nil {
+				require.NotNil(t, err)
+				assert.Equal(t, tt.wantErr, err)
+				return
+			}
+			require.NotNil(t, gotReq)
+			assert.Equal(t, tt.wantReq.URL.String(), gotReq.URL.String())
+			assert.Equal(t, tt.wantReq.Method, gotReq.Method)
+			if !tt.wantReqBody {
+				require.Nil(t, gotReq.Body)
+			}
+			if tt.wantReqBody {
+				require.NotNil(t, gotReq.Body)
+			}
+			numberOfAdditionalHeaders := 1 // with gzip compression enabled, there will be additional header at run time.
+			assert.Equal(t, len(tt.wantReq.Header)+numberOfAdditionalHeaders, len(gotReq.Header))
+			for k := range tt.wantReq.Header {
+			require.Equal(t, tt.wantReq.Header.Get(k), gotReq.Header.Get(k))
+			}
+		})
+	}
+}
+
+func TestGetQueryURL(t *testing.T) {
 	tests := []struct {
 		name          string
 		settings      models.InfinitySettings
 		query         models.Query
+		pCtx          *backend.PluginContext
 		excludeSecret bool
 		want          string
 	}{
@@ -188,10 +283,20 @@ func Test_getQueryURL(t *testing.T) {
 			},
 			want: "https://foo.com/hello?foo=bar&key=val10&key=val11%20val%2B12&key2=value2%2Bvalue3",
 		},
+		{
+			name:     "should respect override from settings",
+			pCtx:     &backend.PluginContext{User: &backend.User{Login: "testuser"}},
+			settings: models.InfinitySettings{SecureQueryFields: map[string]string{"X-Grafana-User": "${__user.login}"}},
+			query: models.Query{
+				URL:        "http://foo.com",
+				URLOptions: models.URLOptions{Params: []models.URLOptionKeyValuePair{{Key: "X-Grafana-User", Value: "fake-user"}}},
+			},
+			want: "http://foo.com?X-Grafana-User=testuser",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			u, err := infinity.GetQueryURL(context.TODO(), tt.settings, tt.query, !tt.excludeSecret)
+			u, err := infinity.GetQueryURL(context.TODO(), tt.pCtx, tt.settings, tt.query, !tt.excludeSecret)
 			assert.Equal(t, err, nil)
 			assert.Equal(t, tt.want, u)
 		})
@@ -209,37 +314,37 @@ func TestClient_GetExecutedURL(t *testing.T) {
 		{
 			query:   models.Query{URL: "https://foo.com"},
 			url:     "https://foo.com",
-			command: "curl -X 'GET' 'https://foo.com'",
+			command: "curl -X 'GET' -H 'Accept-Encoding: gzip' 'https://foo.com'",
 		},
 		{
 			settings: models.InfinitySettings{UserName: "hello", Password: "world", BasicAuthEnabled: true},
 			query:    models.Query{URL: "https://foo.com"},
 			url:      "https://foo.com",
-			command:  "curl -X 'GET' -H 'Authorization: Basic xxxxxxxx' 'https://foo.com'",
+			command:  "curl -X 'GET' -H 'Accept-Encoding: gzip' -H 'Authorization: Basic xxxxxxxx' 'https://foo.com'",
 		},
 		{
 			settings: models.InfinitySettings{AuthenticationMethod: "bearerToken", BearerToken: "world2"},
 			query:    models.Query{URL: "https://foo.com"},
 			url:      "https://foo.com",
-			command:  "curl -X 'GET' -H 'Authorization: Bearer xxxxxxxx' 'https://foo.com'",
+			command:  "curl -X 'GET' -H 'Accept-Encoding: gzip' -H 'Authorization: Bearer xxxxxxxx' 'https://foo.com'",
 		},
 		{
 			settings: models.InfinitySettings{AuthenticationMethod: "apiKey", ApiKeyType: "header", ApiKeyKey: "hello", ApiKeyValue: "world"},
 			query:    models.Query{URL: "https://foo.com"},
 			url:      "https://foo.com",
-			command:  "curl -X 'GET' -H 'Hello: xxxxxxxx' 'https://foo.com'",
+			command:  "curl -X 'GET' -H 'Accept-Encoding: gzip' -H 'Hello: xxxxxxxx' 'https://foo.com'",
 		},
 		{
 			settings: models.InfinitySettings{ForwardOauthIdentity: true},
 			query:    models.Query{URL: "https://foo.com"},
 			url:      "https://foo.com",
-			command:  "curl -X 'GET' -H 'Authorization: xxxxxxxx' 'https://foo.com'",
+			command:  "curl -X 'GET' -H 'Accept-Encoding: gzip' -H 'Authorization: xxxxxxxx' 'https://foo.com'",
 		},
 		{
 			settings: models.InfinitySettings{CustomHeaders: map[string]string{"good": "bye"}, SecureQueryFields: map[string]string{"me": "too"}},
 			query:    models.Query{URL: "https://foo.com?something=${__qs.me}", Type: "json", URLOptions: models.URLOptions{Method: "POST", Body: "my request body with ${__qs.me} value", Headers: []models.URLOptionKeyValuePair{{Key: "hello", Value: "world"}}}},
 			url:      "https://foo.com?me=xxxxxxxx&something=xxxxxxxx",
-			command:  "curl -X 'POST' -d 'my request body with ${__qs.me} value' -H 'Accept: application/json;q=0.9,text/plain' -H 'Content-Type: application/json' -H 'Good: xxxxxxxx' -H 'Hello: xxxxxxxx' 'https://foo.com?me=xxxxxxxx&something=xxxxxxxx'",
+			command:  "curl -X 'POST' -d 'my request body with ${__qs.me} value' -H 'Accept: application/json;q=0.9,text/plain' -H 'Accept-Encoding: gzip' -H 'Content-Type: application/json' -H 'Good: xxxxxxxx' -H 'Hello: xxxxxxxx' 'https://foo.com?me=xxxxxxxx&something=xxxxxxxx'",
 		},
 	}
 	for _, tt := range tests {

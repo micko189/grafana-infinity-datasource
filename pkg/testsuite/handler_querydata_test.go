@@ -24,7 +24,7 @@ func queryData(t *testing.T, ctx context.Context, backendQuery backend.DataQuery
 	t.Helper()
 	query, err := models.LoadQuery(ctx, backendQuery, pluginContext, infClient.Settings)
 	require.Nil(t, err)
-	return pluginhost.QueryDataQuery(ctx, query, infClient, requestHeaders, pluginContext)
+	return pluginhost.QueryDataQuery(ctx, pluginContext, query, infClient, requestHeaders)
 }
 
 func TestAuthentication(t *testing.T) {
@@ -661,16 +661,6 @@ func TestInlineSources(t *testing.T) {
 		test            func(t *testing.T, frame *data.Frame)
 	}{
 		{
-			name: "should execute default query without error",
-			test: func(t *testing.T, frame *data.Frame) {
-				require.NotNil(t, frame)
-				t.Run("should have custom meta data correctly", func(t *testing.T) {
-					require.NotNil(t, frame.Meta.Custom)
-					require.Equal(t, "This feature is not available for this type of query yet", frame.Meta.ExecutedQueryString)
-				})
-			},
-		},
-		{
 			name: "should return inline uql correctly",
 			queryJSON: `{
 				"refId":					"q1",
@@ -793,12 +783,13 @@ func TestRemoteSources(t *testing.T) {
 		test            func(t *testing.T, frame *data.Frame)
 	}{
 		{
-			name: "should execute default query without error",
+			name:   "should execute default query without error",
+			client: NewFromFileName(t, "../../testdata/users.json"),
 			test: func(t *testing.T, frame *data.Frame) {
 				require.NotNil(t, frame)
 				t.Run("should have custom meta data correctly", func(t *testing.T) {
 					require.NotNil(t, frame.Meta.Custom)
-					require.Equal(t, "###############\n## URL\n###############\n\nhttps://raw.githubusercontent.com/grafana/grafana-infinity-datasource/main/testdata/users.json\n\n###############\n## Curl Command\n###############\n\ncurl -X 'GET' -H 'Accept: application/json;q=0.9,text/plain' 'https://raw.githubusercontent.com/grafana/grafana-infinity-datasource/main/testdata/users.json'", frame.Meta.ExecutedQueryString)
+					require.Equal(t, "###############\n## URL\n###############\n\nhttps://raw.githubusercontent.com/grafana/grafana-infinity-datasource/main/testdata/users.json\n\n###############\n## Curl Command\n###############\n\ncurl -X 'GET' -H 'Accept: application/json;q=0.9,text/plain' -H 'Accept-Encoding: gzip' 'https://raw.githubusercontent.com/grafana/grafana-infinity-datasource/main/testdata/users.json'", frame.Meta.ExecutedQueryString)
 				})
 			},
 		},
@@ -811,10 +802,10 @@ func TestRemoteSources(t *testing.T) {
 				"format":					"table",
 				"url":						"http://foo"
 			}`,
-			client: New("[1,2,3]"),
+			client: New(t, "[1,2,3]"),
 			test: func(t *testing.T, frame *data.Frame) {
 				require.NotNil(t, frame)
-				require.Equal(t, "###############\n## URL\n###############\n\nhttp://foo\n\n###############\n## Curl Command\n###############\n\ncurl -X 'GET' -H 'Accept: application/json;q=0.9,text/plain' 'http://foo'", frame.Meta.ExecutedQueryString)
+				require.Equal(t, "###############\n## URL\n###############\n\nhttp://foo\n\n###############\n## Curl Command\n###############\n\ncurl -X 'GET' -H 'Accept: application/json;q=0.9,text/plain' -H 'Accept-Encoding: gzip' 'http://foo'", frame.Meta.ExecutedQueryString)
 				t.Run("should have frame name correctly", func(t *testing.T) {
 					require.Equal(t, "q1", frame.Name)
 				})
@@ -840,10 +831,10 @@ func TestRemoteSources(t *testing.T) {
 				"format":					"table",
 				"url":						"http://bar"
 			}`,
-			client: New("a,b\na1,b1"),
+			client: New(t, "a,b\na1,b1"),
 			test: func(t *testing.T, frame *data.Frame) {
 				require.NotNil(t, frame)
-				require.Equal(t, "###############\n## URL\n###############\n\nhttp://bar\n\n###############\n## Curl Command\n###############\n\ncurl -X 'GET' -H 'Accept: text/csv; charset=utf-8' 'http://bar'", frame.Meta.ExecutedQueryString)
+				require.Equal(t, "###############\n## URL\n###############\n\nhttp://bar\n\n###############\n## Curl Command\n###############\n\ncurl -X 'GET' -H 'Accept: text/csv; charset=utf-8' -H 'Accept-Encoding: gzip' 'http://bar'", frame.Meta.ExecutedQueryString)
 				t.Run("should have frame name correctly", func(t *testing.T) {
 					require.Equal(t, "q1", frame.Name)
 				})
@@ -870,10 +861,10 @@ func TestRemoteSources(t *testing.T) {
 				"url":						"http://foo",
 				"uql":						"parse-json | count"
 			}`,
-			client: New("[1,2,3]"),
+			client: New(t, "[1,2,3]"),
 			test: func(t *testing.T, frame *data.Frame) {
 				require.NotNil(t, frame)
-				require.Equal(t, "###############\n## URL\n###############\n\nhttp://foo\n\n###############\n## Curl Command\n###############\n\ncurl -X 'GET' 'http://foo'\n\n###############\n## UQL\n###############\n\nparse-json | count", frame.Meta.ExecutedQueryString)
+				require.Equal(t, "###############\n## URL\n###############\n\nhttp://foo\n\n###############\n## Curl Command\n###############\n\ncurl -X 'GET' -H 'Accept-Encoding: gzip' 'http://foo'\n\n###############\n## UQL\n###############\n\nparse-json | count", frame.Meta.ExecutedQueryString)
 				t.Run("should have frame name correctly", func(t *testing.T) {
 					require.Equal(t, "q1", frame.Name)
 				})
@@ -901,10 +892,10 @@ func TestRemoteSources(t *testing.T) {
 				"url":						"http://foo",
 				"groq":						"*{1,2,3}"
 			}`,
-			client: New("[1,2,3]"),
+			client: New(t, "[1,2,3]"),
 			test: func(t *testing.T, frame *data.Frame) {
 				require.NotNil(t, frame)
-				require.Equal(t, "###############\n## URL\n###############\n\nhttp://foo\n\n###############\n## Curl Command\n###############\n\ncurl -X 'GET' 'http://foo'\n###############\n## GROQ\n###############\n\n*{1,2,3}\n", frame.Meta.ExecutedQueryString)
+				require.Equal(t, "###############\n## URL\n###############\n\nhttp://foo\n\n###############\n## Curl Command\n###############\n\ncurl -X 'GET' -H 'Accept-Encoding: gzip' 'http://foo'\n###############\n## GROQ\n###############\n\n*{1,2,3}\n", frame.Meta.ExecutedQueryString)
 				t.Run("should have frame name correctly", func(t *testing.T) {
 					require.Equal(t, "q1", frame.Name)
 				})
@@ -935,9 +926,10 @@ func TestRemoteSources(t *testing.T) {
 			require.Nil(t, err)
 			client := tt.client
 			if client == nil {
-				client = New("")
+				client = New(t, "")
 			}
-			frame, err := infinity.GetFrameForURLSources(context.Background(), query, *client, map[string]string{})
+
+			frame, err := infinity.GetFrameForURLSources(context.Background(), &backend.PluginContext{}, query, *client, map[string]string{})
 			if tt.wantErr != nil {
 				require.NotNil(t, err)
 				assert.Equal(t, tt.wantErr, err)
@@ -1401,5 +1393,29 @@ func TestQuery(t *testing.T) {
 			resItem := res.Responses["A"]
 			experimental.CheckGoldenJSONResponse(t, "golden", strings.ReplaceAll(t.Name(), "TestQuery/", ""), &resItem, UPDATE_GOLDEN_DATA)
 		})
+	})
+}
+
+func TestResponseEncoding(t *testing.T) {
+	t.Run("testing gzip compressed content", func(t *testing.T) {
+		server := getServerWithGZipCompressedResponse(t, strings.Join([]string{`name,age`, `foo,123`, `bar,456`}, "\n"))
+		server.Start()
+		defer server.Close()
+		ds := getds(t, backend.DataSourceInstanceSettings{
+			JSONData:                []byte(`{"is_mock": true}`),
+			DecryptedSecureJSONData: map[string]string{},
+		})
+		res, err := ds.QueryData(context.Background(), &backend.QueryDataRequest{
+			Queries: []backend.DataQuery{{RefID: "A", JSON: []byte(fmt.Sprintf(`{ 
+				"type"		:	"csv",
+				"source"	:	"url",
+				"parser" 	: 	"backend",
+				"url" 		: 	"%s"
+			}`, server.URL))}},
+		})
+		require.Nil(t, err)
+		require.NotNil(t, res)
+		resItem := res.Responses["A"]
+		experimental.CheckGoldenJSONResponse(t, "golden", strings.ReplaceAll(t.Name(), "TestResponseEncoding/", ""), &resItem, UPDATE_GOLDEN_DATA)
 	})
 }

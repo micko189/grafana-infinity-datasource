@@ -2,6 +2,7 @@ package infinity
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -98,11 +99,11 @@ func replaceSect(input string, settings models.InfinitySettings, includeSect boo
 	return input
 }
 
-func (client *Client) req(ctx context.Context, url string, body io.Reader, settings models.InfinitySettings, query models.Query, requestHeaders map[string]string) (obj any, statusCode int, duration time.Duration, err error) {
+func (client *Client) req(ctx context.Context, pCtx *backend.PluginContext, url string, body io.Reader, settings models.InfinitySettings, query models.Query, requestHeaders map[string]string) (obj any, statusCode int, duration time.Duration, err error) {
 	ctx, span := tracing.DefaultTracer().Start(ctx, "client.req")
 	logger := backend.Logger.FromContext(ctx)
 	defer span.End()
-	req, err := GetRequest(ctx, settings, body, query, requestHeaders, true)
+	req, err := GetRequest(ctx, pCtx, settings, body, query, requestHeaders, true)
 	if err != nil {
 		return nil, http.StatusInternalServerError, 0, backend.DownstreamError(fmt.Errorf("error preparing request. %w", err))
 	}
@@ -145,7 +146,7 @@ func (client *Client) req(ctx context.Context, url string, body io.Reader, setti
 		// therefore any incoming error is considered downstream
 		return nil, res.StatusCode, duration, backend.DownstreamError(err)
 	}
-	bodyBytes, err := io.ReadAll(res.Body)
+	bodyBytes, err := getBodyBytes(res)
 	if err != nil {
 		logger.Debug("error reading response body", "url", url, "error", err.Error())
 		return nil, res.StatusCode, duration, backend.DownstreamError(err)
@@ -164,12 +165,24 @@ func (client *Client) req(ctx context.Context, url string, body io.Reader, setti
 	return string(bodyBytes), res.StatusCode, duration, err
 }
 
+func getBodyBytes(res *http.Response) ([]byte, error) {
+	if strings.EqualFold(res.Header.Get("Content-Encoding"), "gzip") {
+		reader, err := gzip.NewReader(res.Body)
+		if err != nil {
+			return nil, err
+		}
+		defer reader.Close()
+		return io.ReadAll(reader)
+	}
+	return io.ReadAll(res.Body)
+}
+
 // https://stackoverflow.com/questions/31398044/got-error-invalid-character-%C3%AF-looking-for-beginning-of-value-from-json-unmar
 func removeBOMContent(input []byte) []byte {
 	return bytes.TrimPrefix(input, []byte("\xef\xbb\xbf"))
 }
 
-func (client *Client) GetResults(ctx context.Context, query models.Query, requestHeaders map[string]string) (o any, statusCode int, duration time.Duration, err error) {
+func (client *Client) GetResults(ctx context.Context, pCtx *backend.PluginContext, query models.Query, requestHeaders map[string]string) (o any, statusCode int, duration time.Duration, err error) {
 	logger := backend.Logger.FromContext(ctx)
 	if query.Source == "azure-blob" {
 		if strings.TrimSpace(query.AzBlobContainerName) == "" || strings.TrimSpace(query.AzBlobName) == "" {
@@ -200,11 +213,11 @@ func (client *Client) GetResults(ctx context.Context, query models.Query, reques
 		return string(bodyBytes), http.StatusOK, 0, nil
 	}
 	switch strings.ToUpper(query.URLOptions.Method) {
-	case http.MethodPost:
-		body := GetQueryBody(ctx, query)
-		return client.req(ctx, query.URL, body, client.Settings, query, requestHeaders)
+	case http.MethodGet:
+		return client.req(ctx, pCtx, query.URL, nil, client.Settings, query, requestHeaders)
 	default:
-		return client.req(ctx, query.URL, nil, client.Settings, query, requestHeaders)
+		body := GetQueryBody(ctx, query)
+		return client.req(ctx, pCtx, query.URL, body, client.Settings, query, requestHeaders)
 	}
 }
 
@@ -237,44 +250,46 @@ func CanAllowURL(url string, allowedHosts []string) bool {
 func GetQueryBody(ctx context.Context, query models.Query) io.Reader {
 	logger := backend.Logger.FromContext(ctx)
 	var body io.Reader
-	if strings.EqualFold(query.URLOptions.Method, http.MethodPost) {
-		switch query.URLOptions.BodyType {
-		case "raw":
-			body = strings.NewReader(query.URLOptions.Body)
-		case "form-data":
-			payload := &bytes.Buffer{}
-			writer := multipart.NewWriter(payload)
-			for _, f := range query.URLOptions.BodyForm {
-				_ = writer.WriteField(f.Key, f.Value)
-			}
-			if err := writer.Close(); err != nil {
-				logger.Error("error closing the query body reader")
-				return nil
-			}
-			body = payload
-		case "x-www-form-urlencoded":
-			form := url.Values{}
-			for _, f := range query.URLOptions.BodyForm {
-				form.Set(f.Key, f.Value)
-			}
-			body = strings.NewReader(form.Encode())
-		case "graphql":
-			var variables map[string]interface{}
-			if query.URLOptions.BodyGraphQLVariables != "" {
-				err := json.Unmarshal([]byte(query.URLOptions.BodyGraphQLVariables), &variables)
-				if err != nil {
-					logger.Error("Error parsing graphql variable json", err)
-				}
-			}
-			jsonData := map[string]interface{}{
-				"query":     query.URLOptions.BodyGraphQLQuery,
-				"variables": variables,
-			}
-			jsonValue, _ := json.Marshal(jsonData)
-			body = strings.NewReader(string(jsonValue))
-		default:
-			body = strings.NewReader(query.URLOptions.Body)
+	// according to https://developer.mozilla.org/en-US/docs/Web/HTTP/Methods, GET method should not contain request body
+	if strings.EqualFold(query.URLOptions.Method, http.MethodGet) || strings.TrimSpace(query.URLOptions.Method) == "" {
+		return body
+	}
+	switch query.URLOptions.BodyType {
+	case "raw":
+		body = strings.NewReader(query.URLOptions.Body)
+	case "form-data":
+		payload := &bytes.Buffer{}
+		writer := multipart.NewWriter(payload)
+		for _, f := range query.URLOptions.BodyForm {
+			_ = writer.WriteField(f.Key, f.Value)
 		}
+		if err := writer.Close(); err != nil {
+			logger.Error("error closing the query body reader")
+			return nil
+		}
+		body = payload
+	case "x-www-form-urlencoded":
+		form := url.Values{}
+		for _, f := range query.URLOptions.BodyForm {
+			form.Set(f.Key, f.Value)
+		}
+		body = strings.NewReader(form.Encode())
+	case "graphql":
+		var variables map[string]interface{}
+		if query.URLOptions.BodyGraphQLVariables != "" {
+			err := json.Unmarshal([]byte(query.URLOptions.BodyGraphQLVariables), &variables)
+			if err != nil {
+				logger.Error("Error parsing graphql variable json", err)
+			}
+		}
+		jsonData := map[string]interface{}{
+			"query":     query.URLOptions.BodyGraphQLQuery,
+			"variables": variables,
+		}
+		jsonValue, _ := json.Marshal(jsonData)
+		body = strings.NewReader(string(jsonValue))
+	default:
+		body = strings.NewReader(query.URLOptions.Body)
 	}
 	return body
 }

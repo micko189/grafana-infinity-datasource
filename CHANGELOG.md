@@ -1,8 +1,19 @@
 # Change Log
 
-## 2.12.2
+## 3.0.0-beta.2
 
-### Patch Changes
+🚀 **New Feature**: Support for additional HTTP methods (`PATCH`, `PUT` and `DELETE`) via data source config `allowDangerousHTTPMethods`
+🚀 **Improvements**: Set the backend parser as the default parser for new queries. Existing queries with frontend parser should work as before. If broken, setting the parser to `Frontend` may help.
+⚙️ **Chore**: Update frontend and backend dependencies
+
+## 3.0.0-beta.1
+
+🚀 **New Feature**: Support for passing grafana meta data such as user id, datasource uid to the underlying API as headers / query params via datasource settings
+🚀 **Improvements**: Added support for gzip compression for outgoing requests by default. Fixes [#1003](https://github.com/grafana/grafana-infinity-datasource/issues/1003)
+🚀 **Improvements**: Added frame type to dataplane compliant numeric data frames. This will help us to handle the results correctly in alerts, recorded queries, SSE etc.
+🎉 **Chore**: BREAKING: Plugin now requires Grafana 10.4.8 or newer
+
+## 2.12.2
 
 🐛 Build and publish pipelines uses latest go lang version `1.23.5` which includes security fixes to the `crypto/x509` and `net/http` packages ( CVE-2024-45341 and CVE-2024-45336 ). More details can be found [here](https://groups.google.com/g/golang-announce/c/sSaUhLA-2SI)
 

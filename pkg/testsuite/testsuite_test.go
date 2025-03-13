@@ -2,6 +2,7 @@ package testsuite_test
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -50,11 +51,18 @@ func (rt *InfinityMocker) RoundTrip(req *http.Request) (*http.Response, error) {
 	return nil, errors.New("fake client not working as expected. If you got this error fix this method")
 }
 
-func New(body string) *infinity.Client {
+func New(t *testing.T, body string) *infinity.Client {
+	t.Helper()
 	client, _ := infinity.NewClient(context.TODO(), models.InfinitySettings{})
 	client.HttpClient.Transport = &InfinityMocker{Body: body}
 	client.IsMock = true
 	return client
+}
+
+func NewFromFileName(t *testing.T, fileName string) *infinity.Client {
+	t.Helper()
+	bodyContent, _ := os.ReadFile(fileName)
+	return New(t, string(bodyContent))
 }
 
 func getServerWithStaticResponse(t *testing.T, content string, isFile bool) *httptest.Server {
@@ -71,6 +79,22 @@ func getServerWithStaticResponse(t *testing.T, content string, isFile bool) *htt
 			}
 			_, _ = w.Write([]byte(content))
 		}
+	}))
+	listener, err := net.Listen("tcp", "127.0.0.1:8080")
+	require.Nil(t, err)
+	server.Listener.Close()
+	server.Listener = listener
+	return server
+}
+
+func getServerWithGZipCompressedResponse(t *testing.T, content string) *httptest.Server {
+	t.Helper()
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Add("Content-Encoding", "gzip")
+		gw := gzip.NewWriter(w)
+		defer gw.Close()
+		_, err := gw.Write([]byte(content))
+		require.Nil(t, err)
 	}))
 	listener, err := net.Listen("tcp", "127.0.0.1:8080")
 	require.Nil(t, err)
