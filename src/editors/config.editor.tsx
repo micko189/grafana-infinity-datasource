@@ -123,6 +123,29 @@ export const NetworkEditor = (props: DataSourcePluginOptionsEditorProps<Infinity
   );
 };
 
+export const PaginationEditor = (props: DataSourcePluginOptionsEditorProps<InfinityOptions>) => {
+  const { options, onOptionsChange } = props;
+  const [pageMax, setPageMax] = useState(options.jsonData.pageMax || 5);
+  return (
+    <div style={{ padding: '1px 10px' }}>
+      <div className="gf-form">
+        <InlineFormLabel>Pagination max pages</InlineFormLabel>
+        <Input
+          value={pageMax}
+          type="number"
+          placeholder="pagination max pages"
+          min={0}
+          max={1000}
+          onChange={(e: any) => setPageMax(e.currentTarget.valueAsNumber)}
+          onBlur={() => {
+            onOptionsChange({ ...options, jsonData: { ...options.jsonData, pageMax } });
+          }}
+        />
+      </div>
+    </div>
+  );
+};
+
 export const SecurityEditor = (props: DataSourcePluginOptionsEditorProps<InfinityOptions>) => {
   const { options, onOptionsChange } = props;
   return (
@@ -140,6 +163,7 @@ const config_sections: Array<{ value: string; label: string }> = [
   { value: 'network', label: 'Network' },
   { value: 'security', label: 'Security' },
   { value: 'health_check', label: 'Health check' },
+  { value: 'pagination', label: 'Pagination' },
   { value: 'reference_data', label: 'Reference data' },
   { value: 'global_queries', label: 'Global queries' },
 ];
@@ -223,6 +247,8 @@ export const InfinityConfigEditor = (props: DataSourcePluginOptionsEditorProps<I
             <ReferenceDataEditor options={options} onOptionsChange={onOptionsChange} />
           ) : activeTab === 'health_check' ? (
             <CustomHealthCheckEditor options={options} onOptionsChange={onOptionsChange} />
+          ) : activeTab === 'pagination' ? (
+            <PaginationEditor options={options} onOptionsChange={onOptionsChange} />
           ) : (
             <AuthEditor options={options} onOptionsChange={onOptionsChange} />
           )}
